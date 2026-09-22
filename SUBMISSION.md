@@ -8,7 +8,7 @@
 - **Selected problem:** Problem 1 — Resumable Realtime Conversation
 - **Repository:** https://github.com/rakshithamathew/Real-Time-Feed
 - **Live demo:** https://real-time-feed.vercel.app/
-- **Demo video:** Pending recording and upload; use the verified script in [`DEMO.md`](DEMO.md).
+- **Demo video:** https://drive.google.com/file/d/1y-3nnB_dQVEujDvxi7kM0bbRofKK-qO8/view?usp=sharing
 
 ## Run the project
 
