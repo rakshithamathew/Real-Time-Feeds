@@ -1,146 +1,210 @@
-# Caygnus Product Engineering Challenge
+# Reconnecting Real-Time Incident Feed
 
-> **Before you begin:** Read this README and your selected problem brief completely before starting. If anything is unclear, contact us using whichever option you prefer: [hr@caygnus.com](mailto:hr@caygnus.com) or [Omkar Sonawane on LinkedIn](https://www.linkedin.com/in/omkar-sonawane-ss/).
+An interview-sized incident feed that combines durable, ordered updates with
+low-latency room notifications and cursor-based recovery. REST submits commands;
+WebSocket delivers transient live events; PostgreSQL remains the durable source
+of truth.
 
-We are hiring a **Product Engineer / Full-Stack Developer** to build and ship products in the AI space at Caygnus. The role is available in a **remote or hybrid** working arrangement.
+> **Challenge scope:** This is an incident-feed adaptation of Problem 1's
+> resumable event-stream protocol. It does not model assistant run IDs or
+> `running`/`completed`/`failed` run states. See [SUBMISSION.md](SUBMISSION.md)
+> for the official acceptance-scenario mapping, observed benchmark results, and
+> explicitly incomplete requirements.
 
-We care less about years of experience than evidence: what you have shipped, the complexity or scale you have handled, and how you make engineering and product decisions.
+## Problem and architecture
 
-## The product context
+Clients must see incident updates quickly, survive a dropped connection, avoid
+duplicates, and recover without losing events. WebSocket was selected for
+low-latency server push and explicit connection lifecycle handling. Publishing
+uses REST to separate command submission from transient event delivery.
 
-Imagine a persistent conversational companion that remembers useful context, continues conversations across devices, follows up at the right time, and remains dependable when networks, processes, or model providers fail.
+```mermaid
+flowchart LR
+  A[React client] -->|POST update| API[FastAPI]
+  A <-->|WS room + after cursor| API
+  API -->|commit, sequence, replay| DB[(PostgreSQL)]
+  API -->|in-process room queues| WS[Connected clients]
+```
 
-Building that experience involves more than calling a language model. It requires thoughtful client state, realtime protocols, durable workflows, trustworthy memory, and a reliable AI runtime.
+PostgreSQL assigns the `sequence`, which determines deterministic ordering.
+Each update also has a stable `updateId` for deduplication. The client’s
+centralized merge function deduplicates by `updateId`, sorts by `sequence`, and
+retains the highest successfully processed server sequence for reconnects.
 
-Choose **one** of the following focused problems. You are not expected to build the complete companion.
+The server registers a connection before replay to avoid missing the replay/live
+boundary. Replay and live delivery may overlap; ID-based deduplication makes that
+overlap safe. Publishing is serialized per room in one process, committed before
+fan-out, and delivered through bounded per-connection queues.
 
-| Problem | Primary signal | Detailed brief |
+## Technology choices
+
+- Backend: Python 3.11+, FastAPI, Uvicorn, SQLAlchemy async, asyncpg, Alembic.
+- Frontend: React 19, TypeScript, Vite, Vitest, React Testing Library.
+- Data: PostgreSQL 17, with a database identity column for ordering.
+- Recovery: exclusive `after` sequence cursor plus stable UUID update IDs.
+
+## Prerequisites and setup
+
+Install Node.js 22.12+ and npm, Python 3.11+, and Docker Desktop with a running
+Compose daemon. From `incident-feed/` in PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --wait postgres
+
+cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+```
+
+In a second terminal:
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+Open <http://localhost:5173>. Vite proxies `/api`, `/health`, and `/ws` to
+`http://127.0.0.1:8001`. API docs are at <http://127.0.0.1:8001/docs>.
+
+## Environment variables
+
+The backend loads the repository-root `.env`; exported variables take precedence.
+`.env.example` contains these local-development values:
+
+| Variable | Purpose | Default |
 | --- | --- | --- |
-| Resumable realtime conversation | Streaming, reconnection, ordering, durable event history, and frontend state | [View problem 1](problems/01-resumable-realtime-conversation/README.md) |
-| Offline-capable mobile conversation | Mobile state, local persistence, synchronization, and idempotency | [View problem 2](problems/02-offline-mobile-conversation/README.md) |
-| Durable reminders and follow-ups | Scheduling, workflow durability, retries, time zones, and cancellation | [View problem 3](problems/03-durable-reminders/README.md) |
-| Trustworthy long-term memory | Data modelling, provenance, retrieval, correction, and user control | [View problem 4](problems/04-trustworthy-memory/README.md) |
-| Reliable AI conversation runtime | Orchestration, streaming, safety gates, cancellation, and observability | [View problem 5](problems/05-reliable-conversation-runtime/README.md) |
+| `POSTGRES_USER` | Compose database user | `incident_feed` |
+| `POSTGRES_PASSWORD` | Compose database password | `incident_feed` |
+| `POSTGRES_DB` | Compose database name | `incident_feed` |
+| `POSTGRES_PORT` | Host port mapped to PostgreSQL | `5432` |
+| `DATABASE_URL` | Backend async database URL | `postgresql+asyncpg://incident_feed:incident_feed@localhost:5432/incident_feed` |
+| `TEST_DATABASE_URL` | Optional integration-test database URL | `postgresql+asyncpg://incident_feed:incident_feed@localhost:5433/incident_feed_test` |
+| `FRONTEND_ORIGIN` | Exact browser origin allowed by CORS | `http://localhost:5173` |
+| `VITE_BACKEND_URL` | Production REST/WebSocket backend origin | Empty locally; Vite uses its proxy |
+| `VITE_BACKEND_TARGET` | Optional Vite development proxy target | `http://127.0.0.1:8001` |
 
-Read this page first, then read the complete brief for your selected problem. The problem-specific brief is the source of truth for its acceptance criteria.
+Keep `POSTGRES_*` and `DATABASE_URL` aligned. Compose credentials initialize only
+a new volume. Do not commit `.env`.
 
-## What this challenge is—and is not
+## Migrations and commands
 
-This is a focused credibility exercise, not a request for a production-ready product or unpaid product work. We want to understand how you:
+From `backend/` with the virtual environment active (or use the explicit Windows
+interpreter path shown above):
 
-- Identify the important part of a problem
-- Structure software into clear responsibilities
-- Choose appropriate data structures and interfaces
-- Handle realistic failure and recovery cases
-- Write maintainable, idiomatic code
-- Test important behaviour
-- Explain decisions, trade-offs, and deliberately omitted scope
+```powershell
+python -m alembic upgrade head
+python -m alembic check
+python -m alembic downgrade -1
+```
 
-We do **not** expect authentication, production infrastructure, elaborate visual design, or a long feature list. Extra scope does not compensate for an unreliable core implementation.
+Run the backend with `python -m uvicorn app.main:app --reload --host 127.0.0.1
+--port 8001`. Run the frontend from `frontend/` with `npm run dev`; use
+`npm run build` for a type-check plus production build and `npm run preview` to
+serve that build. Stop PostgreSQL with `docker compose down` (add `--volumes` to
+delete its local data).
 
-## Time and technology
+## Protocol
 
-- Submit your solution within **3–4 calendar days** of receiving the challenge.
-- We recommend spending approximately **6–8 hours** of active work. You are not expected to spend the entire submission window building.
-- You may use **any appropriate language, framework, database, infrastructure, or model provider**.
-- For the mobile problem, produce a runnable mobile experience using React Native, Flutter, or a native platform.
-- Explain why you selected your stack and its important trade-offs.
-- An incomplete but well-reasoned submission is better than a large, overbuilt submission.
+Publish an update through REST. The server creates `updateId`, `createdAt`, and
+the PostgreSQL-assigned `sequence`, then commits before broadcasting:
 
-If a requirement is unclear, make a reasonable assumption, document it, and continue. We evaluate the quality of your decision—not whether you guessed an unstated preference.
+```http
+POST /api/rooms/incident-001/updates
+Content-Type: application/json
 
-## How to complete the challenge
+{"content":"Investigating elevated error rate","clientId":"A"}
+```
 
-1. Fork this repository.
-2. Choose one problem from the table above.
-3. Build your solution in your fork using any structure appropriate for your stack.
-4. Copy [SUBMISSION_TEMPLATE.md](SUBMISSION_TEMPLATE.md) to `SUBMISSION.md` and complete every section.
-5. Add focused automated tests.
-6. Run the problem-specific verification benchmark.
-7. Record the required demo video.
-8. Verify that setup instructions and video permissions work for someone outside your account.
-9. Submit the link to your fork.
+The `201` response has this shape:
 
-Do not modify the problem statement to make your implementation appear compliant. If you intentionally interpret a requirement differently, explain the interpretation in `SUBMISSION.md`.
+```json
+{"sequence":42,"updateId":"76e944c2-3be1-4fab-b265-ce180024e27f","roomId":"incident-001","clientId":"A","content":"Investigating elevated error rate","createdAt":"2026-09-18T11:30:00+00:00"}
+```
 
-## Required submission evidence
+Recover over REST with an exclusive cursor:
 
-A submission is complete only when it contains all of the following.
+```http
+GET /api/rooms/incident-001/updates?after=41&limit=50
+```
 
-### 1. Runnable source code
+The response is `{ "updates": [...], "latestSequence": 42, "hasMore": false }`.
+Connect for live delivery with the same cursor:
 
-The reviewer must be able to run the selected acceptance scenarios. Never commit API keys, credentials, access tokens, private datasets, or other secrets.
+```text
+ws://localhost:5173/ws/rooms/incident-001?after=41
+```
 
-### 2. Completed `SUBMISSION.md`
+Each WebSocket message is:
 
-Use the provided [submission template](SUBMISSION_TEMPLATE.md). It asks for setup and test instructions, architecture, technology choices, completed acceptance scenarios, benchmark evidence, assumptions, limitations, AI usage, and a credibility note.
+```json
+{"type":"update","data":{"updateId":"76e944c2-3be1-4fab-b265-ce180024e27f","roomId":"incident-001","clientId":"A","content":"Investigating elevated error rate","createdAt":"2026-09-18T11:30:00+00:00","sequence":42}}
+```
 
-Aim for setup instructions that a reviewer can follow within approximately 10 minutes.
+The client reconnects with the highest sequence it successfully processed.
+Retries use bounded exponential backoff with jitter, capped at eight retries, so
+an outage does not create a tight retry loop.
 
-### 3. Focused tests
+## Two-client demo
 
-At minimum, include one important successful path, one relevant failure or recovery path, and any deterministic tests required by the selected problem brief.
+1. Open `http://localhost:5173/?room=incident-001&client=A`.
+2. Select **Open Client B** and keep both clients in the same room.
+3. Publish from Client A and confirm Client B receives it live.
+4. Select **Simulate outage** on Client B.
+5. Publish two updates from Client A, then select **Resume connection** on B.
+6. Confirm the missed updates replay once and remain in sequence order.
 
-We value meaningful tests over a high coverage percentage. Tests must not depend on paid external services.
+The development UI exposes the cursor and retry state. See [DEMO.md](DEMO.md)
+for the longer walkthrough and server log examples.
 
-### 4. Demo video
+## Tests and strategy
 
-Attach a **3–5 minute demo video** using Loom, YouTube, Google Drive, or another accessible service. Put the link near the top of `SUBMISSION.md`.
+Frontend commands from `frontend/`:
 
-The video must show the project running, the required successful scenario, at least one failure or recovery scenario, the problem-specific benchmark, a brief architecture explanation, and one important trade-off.
+```powershell
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
 
-A straightforward screen recording with narration is sufficient. Production-quality editing is not expected. A submission without an accessible demo video is incomplete.
+Backend commands from `backend/`:
 
-### 5. Credibility note
+```powershell
+python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
+```
 
-Briefly describe one product or system you previously helped ship:
+The default backend suite runs without PostgreSQL. For integration coverage,
+start the isolated test database from the repository root and run from `backend/`:
 
-- What problem it solved
-- Your personal contribution
-- The scale or operational complexity involved
-- One difficult engineering or product decision you made
-- A public link, repository, case study, or other evidence when available
+```powershell
+docker compose --profile test up -d --wait postgres-test
+$env:TEST_DATABASE_URL = 'postgresql+asyncpg://incident_feed:incident_feed@localhost:5433/incident_feed_test'
+$env:DATABASE_URL = $env:TEST_DATABASE_URL
+$env:RUN_DB_TESTS = '1'
+python -m alembic upgrade head
+python -m pytest
+```
 
-You may anonymize confidential details and use approximate figures. Scale can be demonstrated through users, traffic, concurrency, data volume, latency, reliability, cost, deployment complexity, or operational responsibility.
+Tests cover schemas, health, REST publishing and paging, persistence, room
+isolation, replay, multiple subscribers, disconnect cleanup, slow-subscriber
+handling, and the React reconnect/merge behavior. Database tests roll back their
+work and migrations are applied explicitly.
 
-## Using AI tools
+## Limitations and out of scope
 
-You may use AI tools while completing this challenge. AI usage will not reduce your score.
-
-Disclose which tools you used, what they helped with, and how you reviewed their output. You remain responsible for everything in your submission. We are not evaluating how much code you typed manually; we are evaluating the software you chose to submit and your understanding of it.
-
-During review, we will consider decomposition, component boundaries, data structures, state transitions, coding patterns, maintainability, failure recovery, useful abstractions, and meaningful tests. You should be able to explain any part of the submission. In a follow-up discussion, we may ask you to make or describe a small change.
-
-## How we evaluate submissions
-
-Reviewers use the same public [review scorecard](REVIEW_SCORECARD.md) for every technology stack and problem choice.
-
-| Area | Weight | What we look for |
-| --- | ---: | --- |
-| Core correctness | 25% | The selected acceptance scenarios and verification benchmark work consistently. |
-| Software architecture and decomposition | 25% | Responsibilities, boundaries, interfaces, state ownership, and data flow are clear. |
-| Coding patterns and maintainability | 20% | The code is readable, consistent, idiomatic, and no more complicated than necessary. |
-| Failure handling | 15% | Important failures are identified, observable, bounded, and recoverable. |
-| Testing | 10% | Tests focus on valuable success, failure, and recovery behaviour. |
-| Communication and trade-offs | 5% | Decisions, assumptions, limitations, and alternatives are explained clearly. |
-
-We do not award additional points for visual polish, deployment, fashionable technology choices, raw code volume, or unrelated features unless they materially improve the selected capability.
-
-## Reasons a submission may be incomplete
-
-- The repository or demo video is inaccessible.
-- Setup instructions are absent or cannot reasonably be followed.
-- The selected problem is not identified.
-- The core acceptance scenario or required benchmark is not demonstrated.
-- Secrets or private credentials are committed.
-- Large portions of submitted code cannot be explained by the candidate.
-
-An incomplete optional feature is not a reason for rejection. Clearly label unfinished work and prioritize the required behaviour.
-
-## How to apply
-
-Submit your repository through [the submission form](https://binary.so/u2QOfUx), or email it to [caygnus@gmail.com](mailto:caygnus@gmail.com).
-
-Include your resume and links to products or projects you have worked on or shipped.
-
-We look forward to seeing how you think and build.
+The current connection manager assumes one FastAPI process. Multiple production
+servers are out of scope; a multi-server version would require a shared pub/sub
+layer, which is intentionally excluded. There is no authentication,
+authorization, durable event broker, heartbeat protocol, history retention policy,
+editing/deletion, or attachments. The Vercel/Render deployment is a demonstration,
+not production infrastructure. A full queue or slow client is disconnected with
+WebSocket code 1013 and recovers from PostgreSQL on reconnect. The selected
+challenge's assistant generator, stable user-message/run IDs, and terminal run
+states are not implemented; [ACCEPTANCE.md](ACCEPTANCE.md) records that gap.
